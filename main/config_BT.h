@@ -181,6 +181,8 @@ struct BTConfig_s {
   unsigned long movingTimer; //Timer that trigger a moving sensor state as offline if not seen
   bool forcePassiveScan; //Force passive scan
   bool enabled; // Enable or disable the BT gateway
+  std::vector<String> whiteListPrefixes; // MAC address prefixes for whitelist (e.g., "A4:C1:38")
+  std::vector<String> blackListPrefixes; // MAC address prefixes for blacklist (e.g., "A4:C1:38")
 };
 
 // Global struct to store live BT configuration data

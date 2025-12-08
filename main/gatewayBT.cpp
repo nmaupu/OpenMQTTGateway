@@ -121,6 +121,8 @@ void BTConfig_init() {
   BTConfig.movingTimer = MovingTimer;
   BTConfig.forcePassiveScan = false;
   BTConfig.enabled = EnableBT;
+  BTConfig.whiteListPrefixes.clear();
+  BTConfig.blackListPrefixes.clear();
 }
 
 unsigned long timeBetweenConnect = 0;
@@ -254,6 +256,27 @@ void BTConfig_fromJson(JsonObject& BTdata, bool startup = false) {
   Config_update(BTdata, "ignoreWBlist", (BTConfig.ignoreWBlist));
   // Enable or disable the BT gateway
   Config_update(BTdata, "enabled", BTConfig.enabled);
+  // Load prefix lists
+  if (BTdata.containsKey("whiteListPrefixes")) {
+    BTConfig.whiteListPrefixes.clear();
+    JsonArray whitePrefixes = BTdata["whiteListPrefixes"];
+    for (JsonVariant prefix : whitePrefixes) {
+      String prefixStr = prefix.as<String>();
+      prefixStr.toUpperCase(); // Normalize to uppercase
+      BTConfig.whiteListPrefixes.push_back(prefixStr);
+      THEENGS_LOG_NOTICE(F("Loaded whitelist prefix: %s" CR), prefixStr.c_str());
+    }
+  }
+  if (BTdata.containsKey("blackListPrefixes")) {
+    BTConfig.blackListPrefixes.clear();
+    JsonArray blackPrefixes = BTdata["blackListPrefixes"];
+    for (JsonVariant prefix : blackPrefixes) {
+      String prefixStr = prefix.as<String>();
+      prefixStr.toUpperCase(); // Normalize to uppercase
+      BTConfig.blackListPrefixes.push_back(prefixStr);
+      THEENGS_LOG_NOTICE(F("Loaded blacklist prefix: %s" CR), prefixStr.c_str());
+    }
+  }
 
   stateBTMeasures(startup);
 
@@ -296,6 +319,15 @@ void BTConfig_fromJson(JsonObject& BTdata, bool startup = false) {
     jo["movingtimer"] = BTConfig.movingTimer;
     jo["forcepscn"] = BTConfig.forcePassiveScan;
     jo["enabled"] = BTConfig.enabled;
+    // Save prefix lists
+    JsonArray whitePrefixes = jo.createNestedArray("whiteListPrefixes");
+    for (const String& prefix : BTConfig.whiteListPrefixes) {
+      whitePrefixes.add(prefix);
+    }
+    JsonArray blackPrefixes = jo.createNestedArray("blackListPrefixes");
+    for (const String& prefix : BTConfig.blackListPrefixes) {
+      blackPrefixes.add(prefix);
+    }
     // Save config into NVS (non-volatile storage)
     String conf = "";
     serializeJson(jsonBuffer, conf);
@@ -337,6 +369,12 @@ atomic_int forceBTScan;
 void createOrUpdateDevice(const char* mac, uint8_t flags, int model, int mac_type = 0, const char* name = "");
 
 BLEdevice* getDeviceByMac(const char* mac); // Declared here to avoid pre-compilation issue (misplaced auto declaration by pio)
+
+// Forward declarations for isWhite and isBlack functions
+bool isWhite(BLEdevice* device);
+bool isBlack(BLEdevice* device);
+bool isWhite(const char* mac);
+bool isBlack(const char* mac);
 BLEdevice* getDeviceByMac(const char* mac) {
   THEENGS_LOG_TRACE(F("getDeviceByMac %s" CR), mac);
 
@@ -348,18 +386,121 @@ BLEdevice* getDeviceByMac(const char* mac) {
   return &NO_BT_DEVICE_FOUND;
 }
 
+// Helper function to check if a MAC address matches a prefix
+bool macMatchesPrefix(const char* mac, const char* prefix) {
+  if (mac == nullptr || prefix == nullptr) return false;
+  size_t prefixLen = strlen(prefix);
+  if (prefixLen == 0) return false;
+  // Check if MAC starts with the prefix (case-insensitive)
+  return strncasecmp(mac, prefix, prefixLen) == 0;
+}
+
+// Helper function to check if a MAC address matches any prefix in a list
+bool macMatchesPrefixList(const char* mac, const std::vector<String>& prefixList) {
+  for (const String& prefix : prefixList) {
+    if (macMatchesPrefix(mac, prefix.c_str())) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Check if a device is whitelisted (either by exact match or prefix match)
+bool isWhite(BLEdevice* device) {
+  if (device == nullptr) return false;
+  // Check device flag first (only if device exists)
+  if (device != &NO_BT_DEVICE_FOUND && device->isWhtL) return true;
+  // Check prefix list using device MAC address
+  if (device != &NO_BT_DEVICE_FOUND && device->macAdr[0] != '\0') {
+    return macMatchesPrefixList(device->macAdr, BTConfig.whiteListPrefixes);
+  }
+  return false;
+}
+
+// Check if a device is blacklisted (either by exact match or prefix match)
+bool isBlack(BLEdevice* device) {
+  if (device == nullptr) return false;
+  // Check device flag first (only if device exists)
+  if (device != &NO_BT_DEVICE_FOUND && device->isBlkL) return true;
+  // Check prefix list using device MAC address
+  if (device != &NO_BT_DEVICE_FOUND && device->macAdr[0] != '\0') {
+    return macMatchesPrefixList(device->macAdr, BTConfig.blackListPrefixes);
+  }
+  return false;
+}
+
+// Overloaded functions to check MAC address directly (for new devices not yet in the list)
+bool isWhite(const char* mac) {
+  if (mac == nullptr || mac[0] == '\0') return false;
+  return macMatchesPrefixList(mac, BTConfig.whiteListPrefixes);
+}
+
+bool isBlack(const char* mac) {
+  if (mac == nullptr || mac[0] == '\0') return false;
+  return macMatchesPrefixList(mac, BTConfig.blackListPrefixes);
+}
+
 bool updateWorB(JsonObject& BTdata, bool isWhite) {
   THEENGS_LOG_TRACE(F("update WorB" CR));
   const char* jsonKey = isWhite ? "white-list" : "black-list";
 
-  int size = BTdata[jsonKey].size();
-  if (size == 0)
+  // Check if the key exists
+  if (!BTdata.containsKey(jsonKey))
     return false;
+
+  int size = BTdata[jsonKey].size();
+  
+  // Clear existing prefixes for this list (even if array is empty, to allow clearing)
+  if (isWhite) {
+    BTConfig.whiteListPrefixes.clear();
+  } else {
+    BTConfig.blackListPrefixes.clear();
+  }
+
+  if (size == 0) {
+    // Array exists but is empty - we've cleared the prefixes
+    // Update oneWhite flag: if whitelist, check if there are any whitelisted devices left
+    if (isWhite) {
+      oneWhite = false;
+      // Check all devices to see if any are still whitelisted
+      for (vector<BLEdevice*>::iterator it = devices.begin(); it != devices.end(); ++it) {
+        if ((*it)->isWhtL) {
+          oneWhite = true;
+          break;
+        }
+      }
+      // Also check if there are any prefixes left (shouldn't be, but just in case)
+      if (!oneWhite && !BTConfig.whiteListPrefixes.empty()) {
+        oneWhite = true;
+      }
+    }
+    return true; // Array exists but is empty - we've cleared the prefixes, return true to indicate update
+  }
 
   for (int i = 0; i < size; i++) {
     const char* mac = BTdata[jsonKey][i];
-    createOrUpdateDevice(mac, (isWhite ? device_flags_isWhiteL : device_flags_isBlackL),
-                         UNKWNON_MODEL);
+    if (mac == nullptr) continue;
+    
+    // A full MAC address is 17 characters (e.g., "A4:C1:38:XX:XX:XX")
+    // If the entry is shorter, treat it as a prefix
+    size_t macLen = strlen(mac);
+    if (macLen < 17) {
+      // This is a prefix, store it in the prefix list
+      String prefix = String(mac);
+      prefix.toUpperCase(); // Normalize to uppercase
+      if (isWhite) {
+        BTConfig.whiteListPrefixes.push_back(prefix);
+        oneWhite = true; // Update oneWhite flag when adding whitelist prefix
+        THEENGS_LOG_NOTICE(F("Added whitelist prefix: %s" CR), prefix.c_str());
+      } else {
+        BTConfig.blackListPrefixes.push_back(prefix);
+        THEENGS_LOG_NOTICE(F("Added blacklist prefix: %s" CR), prefix.c_str());
+      }
+    } else {
+      // This is a full MAC address, create/update device as before
+      createOrUpdateDevice(mac, (isWhite ? device_flags_isWhiteL : device_flags_isBlackL),
+                           UNKWNON_MODEL);
+    }
   }
 
   return true;
@@ -441,8 +582,10 @@ void updateDevicesStatus() {
     }
     // Device tracker devices
     if (isTracker) { // We apply the offline status only for tracking device, can be extended further to all the devices
+      bool deviceIsWhite = p->isWhtL || isWhite(p->macAdr);
+      bool deviceIsBlack = p->isBlkL || isBlack(p->macAdr);
       if ((p->lastUpdate != 0) && (p->lastUpdate < (now - BTConfig.presenceAwayTimer) && (now > BTConfig.presenceAwayTimer)) &&
-          (BTConfig.ignoreWBlist || ((!oneWhite || isWhite(p)) && !isBlack(p)))) { // Only if WBlist is disabled OR ((no white MAC OR this MAC is white) AND not a black listed MAC)) {
+          (BTConfig.ignoreWBlist || ((!oneWhite || deviceIsWhite) && !deviceIsBlack))) { // Only if WBlist is disabled OR ((no white MAC OR this MAC is white) AND not a black listed MAC)) {
         StaticJsonDocument<JSON_MSG_BUFFER> BLEdataBuffer;
         JsonObject BLEdata = BLEdataBuffer.to<JsonObject>();
         BLEdata["id"] = p->macAdr;
@@ -455,8 +598,10 @@ void updateDevicesStatus() {
     }
     // Moving detection devices (devices with an accelerometer)
     if (p->sensorModel_id == TheengsDecoder::BLE_ID_NUM::BC08) {
+      bool deviceIsWhite = p->isWhtL || isWhite(p->macAdr);
+      bool deviceIsBlack = p->isBlkL || isBlack(p->macAdr);
       if ((p->lastUpdate != 0) && (p->lastUpdate < (now - BTConfig.movingTimer) && (now > BTConfig.movingTimer)) &&
-          (BTConfig.ignoreWBlist || ((!oneWhite || isWhite(p)) && !isBlack(p)))) { // Only if WBlist is disabled OR ((no white MAC OR this MAC is white) AND not a black listed MAC)) {
+          (BTConfig.ignoreWBlist || ((!oneWhite || deviceIsWhite) && !deviceIsBlack))) { // Only if WBlist is disabled OR ((no white MAC OR this MAC is white) AND not a black listed MAC)) {
         StaticJsonDocument<JSON_MSG_BUFFER> BLEdataBuffer;
         JsonObject BLEdata = BLEdataBuffer.to<JsonObject>();
         BLEdata["id"] = p->macAdr;
@@ -645,8 +790,9 @@ void procBLETask(void* pvParameters) {
       BLEdata["id"] = advertisedDevice->getAddress().toString();
       BLEdata["mac_type"] = advertisedDevice->getAddress().getType();
       BLEdata["adv_type"] = advertisedDevice->getAdvType();
-      THEENGS_LOG_NOTICE(F("BT Device detected: %s" CR), BLEdata["id"].as<const char*>());
-      BLEdevice* device = getDeviceByMac(BLEdata["id"].as<const char*>());
+      const char* macAddr = BLEdata["id"].as<const char*>();
+      THEENGS_LOG_NOTICE(F("BT Device detected: %s" CR), macAddr);
+      BLEdevice* device = getDeviceByMac(macAddr);
 
       if (BTConfig.filterConnectable && device->connect) {
         THEENGS_LOG_NOTICE(F("Filtered connectable device" CR));
@@ -654,7 +800,10 @@ void procBLETask(void* pvParameters) {
         continue;
       }
 
-      if (BTConfig.ignoreWBlist || ((!oneWhite || isWhite(device)) && !isBlack(device))) { // Only if WBlist is disabled OR ((no white MAC OR this MAC is white) AND not a black listed MAC)
+      // Check whitelist/blacklist: use MAC address directly for prefix matching (works for new devices too)
+      bool deviceIsWhite = (device != &NO_BT_DEVICE_FOUND && device->isWhtL) || isWhite(macAddr);
+      bool deviceIsBlack = (device != &NO_BT_DEVICE_FOUND && device->isBlkL) || isBlack(macAddr);
+      if (BTConfig.ignoreWBlist || ((!oneWhite || deviceIsWhite) && !deviceIsBlack)) { // Only if WBlist is disabled OR ((no white MAC OR this MAC is white) AND not a black listed MAC)
         if (advertisedDevice->haveName())
           BLEdata["name"] = (char*)advertisedDevice->getName().c_str();
         if (advertisedDevice->haveManufacturerData()) {

@@ -124,6 +124,17 @@ A white list is a list of MAC addresses permitted to be published by OMG
 to set white list
 `mosquitto_pub -t home/OpenMQTTGateway/commands/MQTTtoBT/config -m '{"white-list":["01:23:14:55:16:15","4C:65:77:88:9C:79","4C:65:A6:66:3C:79"]}'`
 
+### MAC Address Prefix Matching
+You can whitelist or blacklist devices by MAC address prefix instead of listing each device individually. Any entry in the white-list or black-list that is shorter than a full MAC address (17 characters) will be treated as a prefix and will match all devices whose MAC address starts with that prefix.
+
+For example, to whitelist all devices with MAC addresses starting with "A4:C1:38":
+`mosquitto_pub -t home/OpenMQTTGateway/commands/MQTTtoBT/config -m '{"white-list":["A4:C1:38"]}'`
+
+You can mix full MAC addresses and prefixes in the same list:
+`mosquitto_pub -t home/OpenMQTTGateway/commands/MQTTtoBT/config -m '{"white-list":["A4:C1:38","01:23:14:55:16:15"]}'`
+
+Prefix matching is case-insensitive and will match any device whose MAC address begins with the specified prefix. This is particularly useful when you have multiple devices from the same manufacturer that share a common MAC address prefix.
+
 to temporarily disable white/black list
 `mosquitto_pub -t home/OpenMQTTGateway/commands/MQTTtoBT/config -m '{"ignoreWBlist":true}'`
 
